@@ -1,0 +1,564 @@
+%{
+
+#include <iostream>
+#include "parser.hpp"
+#include "SymbolTable.hpp"
+#include "output.hpp"
+
+
+extern  int yylex();
+extern  int yyerror(const string message);
+extern int yylineno;
+
+using namespace std;
+using namespace output;
+
+int in_while_counter=0;
+vector<Node*> typeOfCurrentFunction;
+
+static Id* checkFormals(Node* n_id,Node* n_formals );
+
+SymbolTable symbol_table;
+
+
+%}
+%token VOID
+%token INT
+%token BYTE
+%token B
+%token BOOL
+%left OR
+%left AND
+
+
+%token TRUE
+%token FALSE
+%token RETURN
+%nonassoc IF
+%nonassoc IFX
+%nonassoc WHILE
+%nonassoc ELSE
+%token BREAK
+%token CONTINUE
+%token SC
+%token COMMA
+%token ID
+%token NUM
+%token STRING
+
+%right ASSIGN
+
+%left  RELOPL
+%nonassoc RELOPNA
+%left BINOPL
+%left BINOPH
+
+%left LPAREN
+%left RPAREN
+%left LBRACE
+%left RBRACE
+%right NOT
+
+%%
+
+
+
+
+%%
+
+Program :	Funcs
+{
+	//check if there is a correct main function
+	Id* n_main=new Id(string("main"));
+	Func* main=symbol_table.getFunction(n_main);
+	if(!main ){
+		errorMainMissing();
+		exit(0);
+	}else{
+		if(main->args.size() != 0 || main->retType->t_type != T_VOID){
+			errorMainMissing();
+			exit(0);
+		}
+	}
+	symbol_table.popScope();//global scope
+} 
+;
+
+
+Funcs	:FuncDecl Funcs
+;
+
+FuncDecl	: RetType ID LPAREN Formals RPAREN
+{
+	if(symbol_table.isVarExist($2) || symbol_table.isFuncExist($2)){
+		errorDef(yylineno,getName($2));
+		exit(0);
+	}
+	Id* badId=checkFormals($2,$4);
+	if(badId){
+		errorDef(yylineno,getName(badId));
+		exit(0);
+	}
+	symbol_table.insertNewFunc($1,$2,$4);
+	typeOfCurrentFunction.push_back($1);
+}
+			LBRACE Statements RBRACE
+{
+	symbol_table.popScope();
+	typeOfCurrentFunction.pop_back();
+}
+;
+
+RetType : Type
+{
+	$$=$1;
+}
+;
+
+RetType : VOID 
+{
+	$$=new Type(T_VOID);
+}
+;
+
+Formals  :
+{
+	$$ =new Formals();
+}
+;
+
+Formals : FormalsList
+{
+	$$=$1;
+}
+;
+
+FormalsList : FormalDecl
+{
+	$$=new Formals($1);
+}
+;
+FormalsList : FormalDecl COMMA FormalsList
+{
+	$$=$3;
+	Formals* formalList=dynamic_cast<Formals*>($$);
+	formalList->addFormal($1);	
+}
+;
+
+FormalDecl 	: Type ID
+{
+	if(symbol_table.isVarExist($2) || symbol_table.isFuncExist($2)){
+		errorDef(yylineno,getName($2));
+		exit(0);
+	}
+	$$=new Var($1,$2);
+}
+;
+
+Statements 	: Statement 
+;
+
+Statements 	: Statements Statement
+;
+
+Statement	: LBRACE 
+{
+	symbol_table.newScope();
+}
+			Statements RBRACE
+{
+	symbol_table.popScope();
+}
+;
+
+Statement	: Type ID SC
+{
+	if(symbol_table.isVarExist($2) || symbol_table.isFuncExist($2)){
+		errorDef(yylineno,getName($2));
+		exit(0);
+	}
+	symbol_table.insertNewVar($1,$2);
+	
+}
+;
+
+Statement	: Type ID ASSIGN Exp SC
+{
+	if(symbol_table.isVarExist($2) || symbol_table.isFuncExist($2)){
+		errorDef(yylineno,getName($2));
+		exit(0);
+	}
+	
+	if(!isAssignableTypeExp($1,$4)){
+		errorMismatch(yylineno);
+		exit(0);
+	}
+	symbol_table.insertNewVar($1,$2);
+
+}
+;
+
+
+Statement	: ID ASSIGN Exp SC
+{
+	if(!symbol_table.isVarExist($1)){
+		errorUndef(yylineno,getName($1));
+		exit(0);
+	}
+	Type* type=symbol_table.getVarType($1);
+	if(!isAssignableTypeExp(type,$3)){
+		errorMismatch(yylineno);
+		exit(0);
+	}
+}
+;
+
+
+Statement	: Call SC
+;
+
+Statement	: RETURN SC 
+{
+	T_Type ret=dynamic_cast<Type*>(typeOfCurrentFunction.back())->t_type;
+	if(ret != T_VOID){
+		errorMismatch(yylineno);
+		exit(0);
+
+	}
+	
+}
+;
+
+Statement	: RETURN Exp SC 
+{
+	Type* ret=dynamic_cast<Type*>(typeOfCurrentFunction.back());
+	if(!isAssignableTypeExp(ret,$2) || ret->t_type == T_VOID){
+		errorMismatch(yylineno);
+		exit(0);
+	}
+}
+;
+
+Statement	: IF LPAREN Exp RPAREN checkExp newScope Statement popScope
+;
+checkExp:
+{
+	if(!isBool($-1)){
+		errorMismatch(yylineno);
+		exit(0);
+	}
+}
+;
+newScope :
+{
+	symbol_table.newScope();			
+}
+;
+popScope :
+{
+	symbol_table.popScope();			
+
+}
+
+
+
+Statement	: IF LPAREN Exp RPAREN checkExp newScope Statement 
+				popScope  ELSE newScope Statement popScope
+;
+
+
+Statement	: WHILE LPAREN Exp RPAREN
+{
+	if(!isBool($3)){
+		errorMismatch(yylineno);
+		exit(0);
+	}
+	in_while_counter++;
+	symbol_table.newScope();
+				
+} 
+				Statement 
+{
+	in_while_counter--;
+	symbol_table.popScope();			
+}
+;
+
+Statement	: WHILE LPAREN Exp RPAREN
+{
+	if(!isBool($3)){
+		errorMismatch(yylineno);
+		exit(0);
+	}
+	in_while_counter++;
+	symbol_table.newScope();
+
+}
+				Statement
+{
+	in_while_counter--;
+	symbol_table.popScope();
+}
+;
+
+Statement	: BREAK SC 
+{
+	if(in_while_counter < 1 ){
+		errorUnexpectedBreak(yylineno) ;
+		exit(0);
+	}
+}
+;
+
+Statement	: CONTINUE SC
+{
+	if(in_while_counter < 1 ){
+		errorUnexpectedBreak(yylineno) ;
+		exit(0);
+	}
+	//in_while_counter--;
+}
+;
+
+
+
+
+
+Call	: ID LPAREN ExpList RPAREN
+{
+	if(!symbol_table.isFuncExist($1)){
+		errorUndefFunc(yylineno,getName($1));
+		exit(0);
+	}
+	Func* func=symbol_table.getFunction($1);
+	if(!func->checkArgs($3)){
+		vector<string> args=func->getStringArgs();
+		errorPrototypeMismatch(yylineno,getName($1),args);
+		exit(0);
+	}
+	$$=new Call(func->retType);
+}
+;
+
+
+Call	: ID LPAREN RPAREN
+{
+	if(!symbol_table.isFuncExist($1) ){
+		errorUndefFunc(yylineno,getName($1));
+		exit(0);
+	}
+	Func* func=symbol_table.getFunction($1);
+	if(func->args.size() > 0){
+		vector<string> args=func->getStringArgs();
+		errorPrototypeMismatch(yylineno,getName($1),args);	
+		exit(0);
+	}
+	$$=new Call(func->retType);
+}
+;
+
+
+
+
+
+
+ExpList	: Exp{
+	$$=new ExpList($1);
+	
+};
+
+ExpList	: Exp COMMA ExpList {
+	$$=$3;
+	ExpList* list=dynamic_cast<ExpList*>($$);
+	list->addExp($1);	
+	
+}
+;
+
+
+
+
+Type	: INT
+{
+	$$=new Type(T_INT);
+}
+;
+Type	: BYTE
+{
+	$$=new Type(T_BYTE);
+}
+;
+Type	: BOOL
+{
+	$$=new Type(T_BOOL);
+}
+;
+
+
+
+
+
+Exp		: LPAREN Exp RPAREN
+{
+	$$=$2;
+}
+;
+
+
+Exp		: Exp BINOPL Exp
+{
+	if(!isNumerical($1) || !isNumerical($3)){
+		errorMismatch(yylineno);
+		exit(0);
+	}
+	Type* type=getBiggerType($1,$3);
+	$$=new Exp(type);
+}
+;
+
+Exp		: Exp BINOPH Exp
+{
+	if(!isNumerical($1) || !isNumerical($3)){
+		errorMismatch(yylineno);
+		exit(0);
+	}
+	Type* type =getBiggerType($1,$3);
+	$$=new Exp(type);
+}
+;
+
+Exp		: ID
+{
+	if(!symbol_table.isVarExist($1)){
+		errorUndef(yylineno,getName($1));
+		exit(0);
+	}
+	Type* type=symbol_table.getVarType($1);
+	$$=new Exp(type);
+}
+;
+
+Exp		: Call
+{
+	Type* type=dynamic_cast<Call*>($1)->retType;
+	$$=new Exp(type);
+}
+;
+
+Exp		: NUM 
+{
+	$$=new Exp(T_INT);
+}
+;
+
+Exp		: NUM B 
+{
+	if(!isLegalByteSize($1)){
+		errorByteTooLarge(yylineno,getValue($1));
+		exit(0);
+		
+	}
+	$$=new Exp(T_BYTE);
+}
+;
+
+Exp		: STRING 
+{
+	$$=new Exp(T_STRING);
+
+}
+;
+
+Exp		: TRUE 
+{
+		$$=new Exp(T_BOOL);
+}
+;
+
+Exp		: FALSE
+{
+		$$=new Exp(T_BOOL);
+}
+;
+
+Exp		: NOT Exp
+{
+	if(!isBool($2)){
+		errorMismatch(yylineno);
+		exit(0);
+	}
+	$$=$2;
+}
+;
+
+Exp		: Exp AND Exp
+{
+	if(!isBool($1) ||!isBool($3) ){
+			errorMismatch(yylineno);
+			exit(0);
+	}
+	$$=$1;
+}
+;
+
+Exp		: Exp OR Exp
+{
+	if(!isBool($1) ||!isBool($3) ){
+			errorMismatch(yylineno);
+			exit(0);
+	}
+	$$=$1;
+}
+;
+
+Exp		: Exp RELOP Exp
+{
+	if(!isNumerical($1) || !isNumerical($3)){
+		errorMismatch(yylineno);
+		exit(0);
+	}
+	$$=new Exp(T_BOOL);
+}
+;
+
+
+		
+%%
+
+int main(){
+	yyparse();
+	return 0;
+}	
+		
+		
+int yyerror(const string message){
+	errorSyn(yylineno);
+	exit(0);
+}
+
+	
+static Id* checkFormals(Node* n_id,Node* n_formals ){
+	Formals* formals=dynamic_cast<Formals*>(n_formals);
+	map<string,int> check;
+	string method_name=dynamic_cast<Id*>(n_id)->name;
+	for(vector<Var*>::iterator it=formals->args.begin();it!=formals->args.end();++it){
+		if(check.find((*it)->name) != check.end()){
+			return new Id(((*it)->name));
+		}
+		Id* id=new Id(((*it)->name));
+		if(symbol_table.isVarExist(id) || symbol_table.isFuncExist(id)||id->name == method_name  ){
+			errorDef(yylineno,getName(id));
+			exit(0);
+		}
+		check[(*it)->name]=1;
+	}
+	return NULL;
+
+}	
+		
+		
+		
+		
+		
+		
